@@ -2,8 +2,8 @@
 #
 # Xray VLESS + Reality 一键安装配置脚本
 # 支持：自定义端口（15秒超时随机）、自定义伪装域名（默认 www.tesla.com）、
-#       可选启用 WARP WireGuard 出站分流、
-#       自定义分流域名（默认 geosite:cn + geoip:cn）
+#       可选启用 WARP WireGuard 出站分流 、
+#       自定义分流域名（域名/服务名/geosite/geoip，另可单独分流回国流量）
 #
 
 set -e
@@ -15,7 +15,6 @@ PLAIN='\033[0m'
 
 XRAY_CONFIG_DIR="/usr/local/etc/xray"
 XRAY_CONFIG="${XRAY_CONFIG_DIR}/config.json"
-WARP_DIR="${XRAY_CONFIG_DIR}/warp"
 
 [[ $EUID -ne 0 ]] && { echo -e "${RED}请使用 root 用户运行此脚本${PLAIN}"; exit 1; }
 
@@ -75,53 +74,43 @@ ask_warp() {
     ENABLE_WARP=${ENABLE_WARP:-n}
 }
 
-# ---------- 安装 wgcf ----------
-install_wgcf() {
-    if command -v wgcf &>/dev/null; then
-        return
-    fi
-    echo -e "${GREEN}正在安装 wgcf...${PLAIN}"
-    local arch wgcf_arch wgcf_ver
-    arch=$(uname -m)
-    case "$arch" in
-        x86_64) wgcf_arch="amd64" ;;
-        aarch64) wgcf_arch="arm64" ;;
-        *) echo -e "${RED}不支持的架构: ${arch}${PLAIN}"; exit 1 ;;
-    esac
-    wgcf_ver=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-    curl -L -o /usr/local/bin/wgcf \
-        "https://github.com/ViRb3/wgcf/releases/download/${wgcf_ver}/wgcf_${wgcf_ver#v}_linux_${wgcf_arch}"
-    chmod +x /usr/local/bin/wgcf
-}
-
-# ---------- 按照 xtls 官方文档「方法 1」注册 WARP 并生成 Xray WireGuard 出站参数 ----------
+# ---------- 按照 xtls 官方文档「方法 2」(warp-reg.sh) 注册 WARP 并生成 Xray WireGuard 出站参数 ----------
 # 参考: https://xtls.github.io/document/level-2/warp.html
 setup_warp() {
-    install_wgcf
-    mkdir -p "$WARP_DIR"
-    pushd "$WARP_DIR" >/dev/null
+    WARP_RESERVED="0, 0, 0"
 
-    if [[ ! -f wgcf-account.toml ]]; then
-        echo -e "${GREEN}正在注册 WARP 账户...${PLAIN}"
-        wgcf register --accept-tos
+    echo -e "${GREEN}正在注册 WARP 账户 (warp-reg.sh)...${PLAIN}"
+    if try_warp_regsh; then
+        return
     fi
 
-    echo -e "${GREEN}正在生成 WARP WireGuard 配置...${PLAIN}"
-    wgcf generate
+    echo -e "${RED}WARP 注册失败，请稍后重试，或更换网络环境/VPS 后再运行本脚本。${PLAIN}"
+    exit 1
+}
 
-    WARP_PRIVATE_KEY=$(grep -i "^PrivateKey" wgcf-profile.conf | awk -F'= ' '{print $2}')
-    WARP_ADDR_V4=$(grep -i "^Address" wgcf-profile.conf | head -n1 | awk -F'= ' '{print $2}')
-    WARP_ADDR_V6=$(grep -i "^Address" wgcf-profile.conf | tail -n1 | awk -F'= ' '{print $2}')
-    WARP_PUBLIC_KEY=$(grep -i "^PublicKey" wgcf-profile.conf | awk -F'= ' '{print $2}')
-    WARP_ENDPOINT=$(grep -i "^Endpoint" wgcf-profile.conf | awk -F'= ' '{print $2}')
+# 方法 2：warp-reg.sh，直接返回 JSON
+try_warp_regsh() {
+    local json
+    json=$(bash -c "$(curl -Ls warp-reg.vercel.app)" 2>/tmp/warp_reg.log) || true
 
-    popd >/dev/null
+    WARP_PRIVATE_KEY=$(echo "$json" | grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:"([^"]*)"/\1/')
+    WARP_PUBLIC_KEY=$(echo "$json" | grep -o '"public_key"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:"([^"]*)"/\1/')
+    local v4 v6 reserved
+    v4=$(echo "$json" | grep -o '"v4"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:"([^"]*)"/\1/')
+    v6=$(echo "$json" | grep -o '"v6"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:"([^"]*)"/\1/' | tr -d '[]')
+    reserved=$(echo "$json" | grep -o '"reserved_dec"[[:space:]]*:[[:space:]]*\[[^]]*\]' | grep -o '\[[^]]*\]' | tr -d '[] ')
 
-    if [[ -z "$WARP_PRIVATE_KEY" || -z "$WARP_PUBLIC_KEY" ]]; then
-        echo -e "${RED}WARP 配置生成失败，请检查 wgcf 输出${PLAIN}"
-        exit 1
+    if [[ -z "$WARP_PRIVATE_KEY" || -z "$WARP_PUBLIC_KEY" || -z "$v4" ]]; then
+        return 1
     fi
+
+    WARP_ADDR_V4="${v4}/32"
+    WARP_ADDR_V6="${v6}/128"
+    WARP_ENDPOINT="engage.cloudflareclient.com:2408"
+    [[ -n "$reserved" ]] && WARP_RESERVED="$reserved"
+
     echo -e "${GREEN}WARP 配置生成成功${PLAIN}"
+    return 0
 }
 
 # ---------- 询问分流域名 ----------
@@ -199,7 +188,7 @@ generate_config() {
             "allowedIPs": ["0.0.0.0/0", "::/0"]
           }
         ],
-        "reserved": [0, 0, 0],
+        "reserved": [${WARP_RESERVED}],
         "mtu": 1280
       }
     }
