@@ -122,21 +122,42 @@ ask_split_domains() {
     SPLIT_DOMAINS=""
     SPLIT_IPS=""
 
+    # 归一化: 全角逗号/空格、不间断空格转换成半角逗号/空格
+    INPUT_RULES=$(echo "$INPUT_RULES" | sed 's/，/,/g; s/　/ /g; s/\xc2\xa0/ /g')
+
     if [[ -n "$INPUT_RULES" ]]; then
         IFS=',' read -ra ARR <<< "$INPUT_RULES"
         for item in "${ARR[@]}"; do
-            item=$(echo "$item" | xargs)
+            # 去除首尾空白(含全角空格转换后的普通空格)
+            item=$(echo "$item" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
             [[ -z "$item" ]] && continue
+
             if [[ "$item" == geoip:* ]]; then
-                SPLIT_IPS+="\"$item\","
+                rule_body="${item#geoip:}"
+                if [[ "$rule_body" =~ ^[A-Za-z0-9.:/_-]+$ ]]; then
+                    SPLIT_IPS+="\"$item\","
+                else
+                    echo -e "${RED}忽略无法识别的规则: ${item}${PLAIN}"
+                fi
             elif [[ "$item" == geosite:* ]]; then
-                SPLIT_DOMAINS+="\"$item\","
+                rule_body="${item#geosite:}"
+                if [[ "$rule_body" =~ ^[A-Za-z0-9_!-]+$ ]]; then
+                    SPLIT_DOMAINS+="\"$item\","
+                else
+                    echo -e "${RED}忽略无法识别的规则: ${item}${PLAIN}"
+                fi
             elif [[ "$item" == *.* ]]; then
-                # 含点号的视为完整域名，原样加入
-                SPLIT_DOMAINS+="\"$item\","
-            else
+                # 含点号的视为完整域名，需符合基本域名格式才原样加入
+                if [[ "$item" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]; then
+                    SPLIT_DOMAINS+="\"$item\","
+                else
+                    echo -e "${RED}忽略无法识别的域名: ${item}${PLAIN}"
+                fi
+            elif [[ "$item" =~ ^[A-Za-z0-9_-]+$ ]]; then
                 # 纯服务名，自动转换为 geosite:服务名
                 SPLIT_DOMAINS+="\"geosite:${item}\","
+            else
+                echo -e "${RED}忽略无法识别的规则: ${item}${PLAIN}"
             fi
         done
         SPLIT_DOMAINS="${SPLIT_DOMAINS%,}"
