@@ -20,6 +20,15 @@ Xray VLESS + Reality 一键安装配置脚本，交互式引导完成端口、�
 bash <(curl -Ls https://raw.githubusercontent.com/lanjiangqaq/Xray-Reality/main/Realityinstall.sh)
 ```
 
+## 一键卸载
+
+```bash
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove
+rm -rf /usr/local/etc/xray
+```
+
+如果启用过 WARP 分流，`/usr/local/etc/xray` 目录下的 `warp` 子目录（`wgcf` 账户及配置）会随上述命令一并删除；如需保留 WARP 账户，可先备份该目录再执行卸载。
+
 ## 使用说明
 
 脚本需以 root 权限运行，按提示依次输入：
