@@ -2,7 +2,7 @@
 #
 # Xray VLESS + Reality 一键安装配置脚本
 # 支持：自定义端口（15秒超时随机）、自定义伪装域名（默认 www.tesla.com）、
-#       可选启用 WARP WireGuard 出站分流 、
+#       可选启用 WARP WireGuard 出站分流（xtls.github.io 方法二 / warp-reg.sh）、
 #       自定义分流域名（域名/服务名/geosite/geoip，另可单独分流回国流量）
 #
 
@@ -93,11 +93,13 @@ try_warp_regsh() {
     local json
     json=$(bash -c "$(curl -Ls warp-reg.vercel.app)" 2>/tmp/warp_reg.log) || true
 
-    WARP_PRIVATE_KEY=$(echo "$json" | grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:"([^"]*)"/\1/')
-    WARP_PUBLIC_KEY=$(echo "$json" | grep -o '"public_key"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:"([^"]*)"/\1/')
+    WARP_PRIVATE_KEY=$(echo "$json" | grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/' | head -n1)
+    WARP_PUBLIC_KEY=$(echo "$json" | grep -o '"public_key"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/' | head -n1)
     local v4 v6 reserved
-    v4=$(echo "$json" | grep -o '"v4"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:"([^"]*)"/\1/')
-    v6=$(echo "$json" | grep -o '"v6"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:"([^"]*)"/\1/' | tr -d '[]')
+    # 注意: 返回的 JSON 中 "v4"/"v6" 分别在 endpoint 对象和顶层各出现一次，
+    # 顶层(客户端自身地址)是最后一个匹配，需用 tail -n1 取最后一个
+    v4=$(echo "$json" | grep -o '"v4"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/' | tail -n1)
+    v6=$(echo "$json" | grep -o '"v6"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/' | tail -n1 | tr -d '[]')
     reserved=$(echo "$json" | grep -o '"reserved_dec"[[:space:]]*:[[:space:]]*\[[^]]*\]' | grep -o '\[[^]]*\]' | tr -d '[] ')
 
     if [[ -z "$WARP_PRIVATE_KEY" || -z "$WARP_PUBLIC_KEY" || -z "$v4" ]]; then
