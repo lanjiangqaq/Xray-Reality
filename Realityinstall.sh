@@ -194,8 +194,24 @@ generate_config() {
     mkdir -p "$XRAY_CONFIG_DIR"
 
     WARP_OUTBOUND=""
-    ROUTE_RULES="{\"type\": \"field\", \"protocol\": [\"bittorrent\"], \"outboundTag\": \"block\"}"
     ROUTING_DOMAIN_STRATEGY="IPIfNonMatch"
+
+    # 把逗号分隔的列表转换成多行缩进格式，每项单独一行，indent 为每行前导空格
+    format_list_multiline() {
+        local list="$1" indent="$2"
+        echo "$list" | sed "s/,/,\n${indent}/g"
+    }
+
+    # bittorrent 拦截规则（始终存在），多行缩进格式
+    BLOCK_RULE=$(cat <<EOF
+      {
+        "type": "field",
+        "protocol": ["bittorrent"],
+        "outboundTag": "block"
+      }
+EOF
+)
+    ROUTE_RULES="$BLOCK_RULE"
 
     if [[ "$ENABLE_WARP" =~ ^[Yy]$ ]]; then
         ROUTING_DOMAIN_STRATEGY="AsIs"
@@ -222,15 +238,37 @@ generate_config() {
     }
 EOF
 )
-        WARP_ROUTE_RULE=""
+        WARP_ROUTE_RULES=""
         if [[ -n "$SPLIT_DOMAINS" ]]; then
-            WARP_ROUTE_RULE="{\"type\": \"field\", \"domain\": [${SPLIT_DOMAINS}], \"outboundTag\": \"warp\"}"
+            DOMAIN_ITEMS=$(format_list_multiline "$SPLIT_DOMAINS" "          ")
+            WARP_DOMAIN_RULE=$(cat <<EOF
+      {
+        "type": "field",
+        "domain": [
+          ${DOMAIN_ITEMS}
+        ],
+        "outboundTag": "warp"
+      }
+EOF
+)
+            WARP_ROUTE_RULES="${WARP_DOMAIN_RULE}"
         fi
         if [[ -n "$SPLIT_IPS" ]]; then
-            [[ -n "$WARP_ROUTE_RULE" ]] && WARP_ROUTE_RULE+=","
-            WARP_ROUTE_RULE+="{\"type\": \"field\", \"ip\": [${SPLIT_IPS}], \"outboundTag\": \"warp\"}"
+            IP_ITEMS=$(format_list_multiline "$SPLIT_IPS" "          ")
+            WARP_IP_RULE=$(cat <<EOF
+      {
+        "type": "field",
+        "ip": [
+          ${IP_ITEMS}
+        ],
+        "outboundTag": "warp"
+      }
+EOF
+)
+            [[ -n "$WARP_ROUTE_RULES" ]] && WARP_ROUTE_RULES="${WARP_ROUTE_RULES},"$'\n'
+            WARP_ROUTE_RULES="${WARP_ROUTE_RULES}${WARP_IP_RULE}"
         fi
-        [[ -n "$WARP_ROUTE_RULE" ]] && ROUTE_RULES="${WARP_ROUTE_RULE},${ROUTE_RULES}"
+        [[ -n "$WARP_ROUTE_RULES" ]] && ROUTE_RULES="${WARP_ROUTE_RULES},"$'\n'"${ROUTE_RULES}"
     fi
 
     cat > "$XRAY_CONFIG" <<EOF
@@ -283,7 +321,7 @@ EOF
   "routing": {
     "domainStrategy": "${ROUTING_DOMAIN_STRATEGY}",
     "rules": [
-      ${ROUTE_RULES}
+${ROUTE_RULES}
     ]
   }
 }
