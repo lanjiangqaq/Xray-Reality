@@ -8,15 +8,16 @@
 #
 # 相比旧版修复：
 #   - WARP 不再走第三方 warp-reg，私钥由本机 wg 生成，仅向 Cloudflare 官方接口注册
-#   - config.json 覆盖前自动备份，生成后 chmod 600，校验/启动失败自动回滚
+#   - config.json 覆盖前自动备份，权限 600 且属主设为 systemd 实际服务用户
+#     （服务以 nobody 等非 root 用户运行时同样可读），校验/启动失败自动回滚
 #   - 所有交互 read 加兜底，非交互（管道/面板）运行时不再无声退出
 #   - 随机端口改用 /dev/urandom，覆盖完整 10000-65535
 #   - 端口做占用检查，占用时自动换随机端口
 #   - 伪装域名做合法性校验
-#   - WARP 地址 v6 缺失时只写 v4；endpoint 取官方注册接口返回值
+#   - WARP 地址 v6 缺失时只写 v4；endpoint 取官方注册接口返回值并强制 2408 端口
 #   - 分享链接对 IPv6 地址加括号；拿不到公网 IP 时明确提示
 #   - 结果输出包含 NAT 转发 / 安全组 / 防火墙放行提醒
-#   - Xray 尽量以降权用户运行（官方安装脚本支持时）
+#   - Xray 尽量以降权用户运行（官方安装脚本 -u/--install-user）
 #
 
 set -eo pipefail
@@ -49,8 +50,9 @@ install_xray() {
     local installer=/tmp/xray-install-release.sh
     curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$installer"
 
-    # 官方安装脚本支持 --user 时降权运行（随机/指定端口都在 1024 以上，无需 root）
-    if grep -q -- '--user' "$installer" 2>/dev/null; then
+    # 官方安装脚本支持 -u/--install-user 时降权运行
+    # （随机/指定端口都在 1024 以上，无需 root）
+    if grep -q -- '--install-user' "$installer" 2>/dev/null; then
         if ! id -u xray &>/dev/null; then
             useradd --system --no-create-home --shell /usr/sbin/nologin xray 2>/dev/null || true
         fi
@@ -136,6 +138,37 @@ ask_domain() {
     fi
 
     echo -e "${GREEN}将使用伪装域名: ${DOMAIN}${PLAIN}"
+}
+
+# ---------- 查询 systemd 实际以哪个用户运行 xray ----------
+# 官方安装脚本可能把服务装成 nobody/root/xray，配置文件就必须让那个
+# 用户读得到。优先问 systemd，其次解析 unit 文件，最后退回安装时
+# 记录的用户（全新安装、unit 查询不到时）。
+detect_service_user() {
+    local u=""
+
+    if command -v systemctl &>/dev/null; then
+        u=$(systemctl show -p User --value xray 2>/dev/null || true)
+    fi
+
+    if [[ -z "$u" ]]; then
+        local unit
+        for unit in /etc/systemd/system/xray.service \
+                    /usr/local/lib/systemd/system/xray.service \
+                    /lib/systemd/system/xray.service; do
+            if [[ -f "$unit" ]]; then
+                u=$(grep -E '^[[:space:]]*User[[:space:]]*=' "$unit" |
+                    head -n1 | cut -d= -f2 | tr -d '[:space:]')
+                [[ -n "$u" ]] && break
+            fi
+        done
+    fi
+
+    if [[ -z "$u" ]]; then
+        u="${XRAY_RUN_USER:-root}"
+    fi
+
+    echo "$u"
 }
 
 # ---------- 生成密钥、UUID、ShortID ----------
@@ -467,6 +500,9 @@ rollback_config() {
 generate_config() {
 
     mkdir -p "$XRAY_CONFIG_DIR"
+    # 目录本身也必须让服务用户能进入，否则就算配置文件属主对了，
+    # nobody 等服务用户照样 permission denied
+    chmod 755 "$XRAY_CONFIG_DIR" 2>/dev/null || true
 
     WARP_OUTBOUND=""
 
@@ -685,9 +721,13 @@ ${ROUTE_RULES}
 }
 EOF
 
-    # 私钥在配置文件中，限制为仅属主可读
-    if [[ -n "$XRAY_RUN_USER" ]]; then
-        chown "${XRAY_RUN_USER}:${XRAY_RUN_USER}" "$XRAY_CONFIG" 2>/dev/null || true
+    # 私钥在配置文件中：权限锁 600，属主必须是 systemd 实际运行
+    # xray 的那个用户（可能是 nobody/root/xray），否则服务起不来
+    local svc_user
+    svc_user=$(detect_service_user)
+    if [[ "$svc_user" != "root" ]] && id "$svc_user" &>/dev/null; then
+        chown "${svc_user}:$(id -gn "$svc_user")" "$XRAY_CONFIG" 2>/dev/null || true
+        echo -e "${GREEN}配置文件属主已设为服务用户: ${svc_user}${PLAIN}"
     fi
     chmod 600 "$XRAY_CONFIG"
 
@@ -715,26 +755,25 @@ start_service() {
 
     if ! systemctl restart xray; then
         echo -e "${RED}Xray 服务启动失败${PLAIN}"
+        journalctl -u xray -n 15 --no-pager 2>/dev/null || true
         rollback_config
-        echo -e "${YELLOW}排查命令: journalctl -u xray -n 50 --no-pager${PLAIN}"
         exit 1
     fi
 
-    sleep 1
+    # 最长等约 5 秒确认服务真正进入 active（慢盘/大 geo 文件时 1 秒不够）
+    local _
+    for _ in 1 2 3 4 5; do
+        if systemctl is-active --quiet xray; then
+            echo -e "${GREEN}Xray 服务已启动${PLAIN}"
+            return
+        fi
+        sleep 1
+    done
 
-    if systemctl is-active --quiet xray; then
-
-        echo -e "${GREEN}Xray 服务已启动${PLAIN}"
-
-    else
-
-        echo -e "${RED}Xray 服务启动失败，请执行：${PLAIN}"
-        echo -e "${YELLOW}journalctl -u xray -n 50 --no-pager${PLAIN}"
-
-        rollback_config
-
-        exit 1
-    fi
+    echo -e "${RED}Xray 服务启动失败，最近日志:${PLAIN}"
+    journalctl -u xray -n 15 --no-pager 2>/dev/null || true
+    rollback_config
+    exit 1
 }
 
 # ---------- 输出结果 ----------
