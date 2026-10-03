@@ -108,7 +108,8 @@ try_warp_regsh() {
 
     WARP_ADDR_V4="${v4}/32"
     WARP_ADDR_V6="${v6}/128"
-    WARP_ENDPOINT="engage.cloudflareclient.com:2408"
+    # 用 IP 而非域名作为 endpoint，避免依赖服务器自身 DNS 解析
+    WARP_ENDPOINT="162.159.192.4:2408"
     [[ -n "$reserved" ]] && WARP_RESERVED="$reserved"
 
     echo -e "${GREEN}WARP 配置生成成功${PLAIN}"
@@ -193,9 +194,11 @@ generate_config() {
     mkdir -p "$XRAY_CONFIG_DIR"
 
     WARP_OUTBOUND=""
-    ROUTE_RULES="{\"protocol\": [\"bittorrent\"], \"outboundTag\": \"block\"}"
+    ROUTE_RULES="{\"type\": \"field\", \"protocol\": [\"bittorrent\"], \"outboundTag\": \"block\"}"
+    ROUTING_DOMAIN_STRATEGY="IPIfNonMatch"
 
     if [[ "$ENABLE_WARP" =~ ^[Yy]$ ]]; then
+        ROUTING_DOMAIN_STRATEGY="AsIs"
         WARP_OUTBOUND=$(cat <<EOF
 ,
     {
@@ -206,24 +209,26 @@ generate_config() {
         "address": ["${WARP_ADDR_V4}", "${WARP_ADDR_V6}"],
         "peers": [
           {
-            "publicKey": "${WARP_PUBLIC_KEY}",
             "endpoint": "${WARP_ENDPOINT}",
+            "publicKey": "${WARP_PUBLIC_KEY}",
+            "keepAlive": 5,
             "allowedIPs": ["0.0.0.0/0", "::/0"]
           }
         ],
         "reserved": [${WARP_RESERVED}],
-        "mtu": 1280
+        "mtu": 1280,
+        "domainStrategy": "ForceIP"
       }
     }
 EOF
 )
         WARP_ROUTE_RULE=""
         if [[ -n "$SPLIT_DOMAINS" ]]; then
-            WARP_ROUTE_RULE="{\"domain\": [${SPLIT_DOMAINS}], \"outboundTag\": \"warp\"}"
+            WARP_ROUTE_RULE="{\"type\": \"field\", \"domain\": [${SPLIT_DOMAINS}], \"outboundTag\": \"warp\"}"
         fi
         if [[ -n "$SPLIT_IPS" ]]; then
             [[ -n "$WARP_ROUTE_RULE" ]] && WARP_ROUTE_RULE+=","
-            WARP_ROUTE_RULE+="{\"ip\": [${SPLIT_IPS}], \"outboundTag\": \"warp\"}"
+            WARP_ROUTE_RULE+="{\"type\": \"field\", \"ip\": [${SPLIT_IPS}], \"outboundTag\": \"warp\"}"
         fi
         [[ -n "$WARP_ROUTE_RULE" ]] && ROUTE_RULES="${WARP_ROUTE_RULE},${ROUTE_RULES}"
     fi
@@ -276,7 +281,7 @@ EOF
     }${WARP_OUTBOUND}
   ],
   "routing": {
-    "domainStrategy": "IPIfNonMatch",
+    "domainStrategy": "${ROUTING_DOMAIN_STRATEGY}",
     "rules": [
       ${ROUTE_RULES}
     ]
